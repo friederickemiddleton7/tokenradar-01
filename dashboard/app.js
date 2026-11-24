@@ -166,7 +166,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Each row is priced the way the market already prices its live peers - the median market cap to TVL of its own category, measured from this snapshot - then adjusted for seven-day momentum and how long it has run with no token. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Each row is priced the way the market already prices its live peers - the median market cap to TVL of its own category, measured from this snapshot - then adjusted for seven-day momentum and how long it has run with no token. Implied value is a model, not a promise. Every figure here is read from one frozen snapshot; nothing is fetched, predicted or promised.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -245,7 +245,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. The x TVL column is the measured market-cap-to-TVL multiple for that category, taken from the snapshot itself. Select a row for its model and farm plan.' }),
+          el('caption', { class: 'sub', text: 'All ' + DATA.board_size + ' rows on one board: every watchlist protocol plus the early ones below the floor, ranked by an implied value measured from the snapshot\'s own live-token market. The x TVL column is the measured market-cap-to-TVL multiple for that category, taken from the snapshot itself. Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
