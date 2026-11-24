@@ -63,8 +63,53 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 365,
 };
 
+/**
+ * radar-2's headline change: the valuation multiple is measured from the snapshot itself, not set by hand.
+ *
+ * For every category the snapshot's own live-token protocols carry both a TVL and a market cap, so the
+ * market is already pricing those categories. The median market-cap-to-TVL ratio of a protocol's category
+ * is the multiple a pre-token protocol in that category would plausibly trade at once it launches. A
+ * category with too few live comparables falls back to the whole market's median, and a snapshot with no
+ * live figures at all falls back to the starter's hand value. Every figure comes from the snapshot; no
+ * protocol name is ever special-cased.
+ */
+export const MULTIPLE_FLOOR = 0.05;
+export const MULTIPLE_CAP = 40;
+export const MIN_COMPARABLES = 4;
+
+export function median(values: number[]): number | null {
+  const v = values.filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  const mid = v.length >> 1;
+  return v.length % 2 === 1 ? v[mid]! : (v[mid - 1]! + v[mid]!) / 2;
+}
+
+/** Median mcap/TVL of the live protocols in one category, or null when too few carry both figures. */
+export function categoryMultiple(protocols: SnapshotProtocol[], category: string | null): number | null {
+  const same = protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0 && (p.category ?? '') === (category ?? ''));
+  if (same.length < MIN_COMPARABLES) return null;
+  const ratios = same.map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const m = median(ratios);
+  return m === null ? null : Math.min(MULTIPLE_CAP, Math.max(MULTIPLE_FLOOR, m));
+}
+
+/** The market-wide median mcap/TVL, the fallback when a category is thinly covered. */
+export function marketMultiple(protocols: SnapshotProtocol[]): number | null {
+  const ratios = protocols
+    .filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0)
+    .map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const m = median(ratios);
+  return m === null ? null : Math.min(MULTIPLE_CAP, Math.max(MULTIPLE_FLOOR, m));
+}
+
+/** The multiple a pre-token protocol is priced at: its category's, else the market's, else the hand value. */
+export function comparableMultiple(protocols: SnapshotProtocol[], category: string | null): number {
+  return categoryMultiple(protocols, category) ?? marketMultiple(protocols) ?? MODEL.base_multiple;
+}
+
+
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-1';
+export const MODEL_VERSION = 'radar-2-measured-multiples';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -95,8 +140,11 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  valuation_multiple: number;
+  thesis: string;
   model: {
     base_multiple: number;
+    valuation_multiple: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -118,6 +166,8 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  valuation_multiple: number;
+  thesis: string;
   growth_multiplier: number;
   maturity_multiplier: number;
 }
@@ -172,18 +222,44 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+/** The multipliers and the implied value one protocol gets under `model`, priced at `multiple`. */
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, multiple: number): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = protocol.tvl_usd * model.base_multiple;
+  const base = protocol.tvl_usd * multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
   return { implied, growthPct, growthMult, maturityMult, age };
 }
+
+/**
+ * The one-sentence airdrop thesis for a row, from its own figures. This is the board's stated reason a
+ * protocol sits where it sits: the capital it holds, the market's own multiple for its category, its
+ * seven-day momentum and how long it has run with no token.
+ */
+export function thesis(p: SnapshotProtocol, multiple: number, age: number | null, implied: number): string {
+  const tvl = shortUsd(p.tvl_usd);
+  const cat = p.category ?? 'uncategorised';
+  const chains = p.chains.length > 0 ? p.chains.slice(0, 3).join(', ') : 'no chain named';
+  const ageBit = age === null ? 'DefiLlama records no listing date' : `${age} day${age === 1 ? '' : 's'} live with no token`;
+  const growth = p.change_7d === null ? 'flat seven-day TVL' : `${p.change_7d > 0 ? '+' : ''}${p.change_7d}% seven-day TVL`;
+  return `${p.name} holds ${tvl} of TVL as a ${cat} protocol on ${chains}. Comparable live ${cat} protocols trade at a median ${multiple.toFixed(2)}x TVL, so its capital alone implies about ${shortUsd(implied)}. It shows ${growth}, and ${ageBit}.`;
+}
+
+/** A whole-dollar figure as a short human string: $1.2m, $3.4b, $980. */
+export function shortUsd(n: number): string {
+  if (!Number.isFinite(n)) return '$0';
+  const a = Math.abs(n);
+  if (a >= 1e12) return `$${(n / 1e12).toFixed(2)}t`;
+  if (a >= 1e9) return `$${(n / 1e9).toFixed(2)}b`;
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}m`;
+  if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}k`;
+  return `$${Math.round(n)}`;
+}
+
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -230,8 +306,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, age };
+    const multiple = comparableMultiple(snapshot.protocols, p.category);
+    const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, multiple);
+    return { p, implied, growthPct, growthMult, maturityMult, age, multiple };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -249,14 +326,17 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    valuation_multiple: round4(s.multiple),
+    thesis: thesis(s.p, s.multiple, s.age, s.implied),
     model: {
       base_multiple: model.base_multiple,
+      valuation_multiple: round4(s.multiple),
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_steps: farmSteps(s.p, s.age, s.implied).map(stepText),
   }));
 }
 
@@ -309,42 +389,62 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
- * the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
+ * A protocol's farm plan: eight concrete steps, each an action with what it costs, how long it takes and
+ * what it is worth. The plan is derived from the protocol's own record (category, chains, TVL, age) and
+ * the board's implied value, never from a hand-written list of names. The expected-value steps say what a
+ * position is worth if the board's own implied value is right, at a 1% and a 3% airdrop share, so a
+ * reader can size the position before they open it.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, implied: number): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const AIRDROP_TO_USERS = 0.05;
+  const expected = (cap: number): string => shortUsd(Math.max(1, Math.round(implied * AIRDROP_TO_USERS * (cap / Math.max(1, p.tvl_usd)))));
+  const sharePct = (cap: number): string => {
+    const v = (cap / Math.max(1, p.tvl_usd)) * 100;
+    return v >= 0.01 ? `${v.toFixed(2)}%` : `${v.toFixed(4)}%`;
+  };
+  const gas = capital >= 150 ? 8 : 4;
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
+      text: `Open a fresh wallet used only for this farm and write its address in your log; keep the seed phrase offline and never enter it on a site.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
     {
       text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
+      cost: `$${capital} of capital plus about $${gas} of gas on ${chain}`,
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
+      text: `Make one qualifying action every week while you farm ${p.name} - a deposit, a borrow, a swap or a vote - so your address appears in more than one snapshot.`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
-      cost: `the $${capital} stays in the position`,
-      time: `${hold} days`,
+      text: `Hold the position at least ${hold} days without withdrawing, because airdrop snapshots reward address age and uninterrupted liquidity.`,
+      cost: `the $${capital} stays locked in the position`,
+      time: `${hold} days of patience`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
-      cost: 'no fee to check, and never pay to claim',
-      time: '10 minutes',
+      text: `Size the position before you open it. This board implies ${p.name} is worth ${shortUsd(implied)}; if 5% of that reaches users pro-rata by TVL, $${capital} expects about ${expected(capital)}, $${capital * 10} about ${expected(capital * 10)} and $${capital * 100} about ${expected(capital * 100)}.`,
+      cost: 'no fee - arithmetic on the implied value the board states',
+      time: '5 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
+      text: `Check ${p.name}'s own points, docs and governance page once a week from the links it publishes, and watch for a token announcement or a snapshot block.`,
+      cost: 'no fee to read; never pay anyone to claim',
+      time: '10 minutes a week',
+    },
+    {
+      text: `If a token launches, claim from the protocol's own site only, then consider selling enough to return your $${capital} of principal and holding the rest.`,
+      cost: `about $${gas} of gas to claim`,
+      time: '20 minutes on launch day',
+    },
+    {
+      text: `Write the wallet, every date, every transaction and the outcome in a farm log, so the position can be repeated next season or unwound without guessing.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
@@ -382,6 +482,8 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    valuation_multiple: row.valuation_multiple,
+    thesis: row.thesis,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
   };
